@@ -1,0 +1,275 @@
+import pandas as pd
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_squared_error, r2_score
+
+# Load datasets
+customer_df = pd.read_csv("customer_data_collection.csv")
+product_df = pd.read_csv("product_recommendation_data.csv")
+
+# Drop empty/unnamed columns
+customer_df = customer_df.drop(columns=["Unnamed: 10"], errors='ignore')
+product_df = product_df.drop(columns=["Unnamed: 13", "Unnamed: 14"], errors='ignore')
+
+# Merge on common contextual features
+merged_df = pd.merge(customer_df, product_df,
+                     on=["Holiday", "Season", "Geographical_Location"],
+                     how="inner")
+
+# Drop non-numeric, ID, or list-based columns
+merged_df = merged_df.drop(columns=[
+    "Customer_ID", "Location", "Browsing_History",
+    "Purchase_History", "Similar_Product_List"
+], errors='ignore')
+
+# Drop missing values
+merged_df = merged_df.dropna()
+
+# Encode categorical features
+label_encoders = {}
+for col in merged_df.select_dtypes(include=['object']).columns:
+    le = LabelEncoder()
+    merged_df[col] = le.fit_transform(merged_df[col])
+    label_encoders[col] = le
+
+# Split features and label
+X = merged_df.drop(columns=["Probability_of_Recommendation"])
+y = merged_df["Probability_of_Recommendation"]
+
+# Train/test split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+
+# Train a Random Forest Regressor
+model = RandomForestRegressor(n_estimators=100, random_state=42)
+model.fit(X_train, y_train)
+
+# Predict and evaluate
+y_pred = model.predict(X_test)
+mse = mean_squared_error(y_test, y_pred)
+r2 = r2_score(y_test, y_pred)
+
+# Output model evaluation
+print("📉 Mean Squared Error:", mse)
+print("📈 R2 Score:", r2)
+
+# (Optional) Save model
+import joblib
+joblib.dump(model, "recommendation_model.pkl")
+import sqlite3
+
+# Connect to SQLite database (or create it)
+conn = sqlite3.connect("memory.db")
+cursor = conn.cursor()
+
+# Create table: customers
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS customers (
+    customer_id TEXT PRIMARY KEY,
+    age INTEGER,
+    gender TEXT,
+    location TEXT,
+    segment TEXT
+)
+""")
+
+# Create table: products
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS products (
+    product_id TEXT PRIMARY KEY,
+    name TEXT,
+    category TEXT,
+    price REAL,
+    season TEXT,
+    holiday TEXT,
+    description TEXT
+)
+""")
+
+# Create table: interactions
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS interactions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    customer_id TEXT,
+    product_id TEXT,
+    recommended INTEGER,
+    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+)
+""")
+
+# Create table: embeddings (Ollama-based)
+cursor.execute("""
+CREATE TABLE IF NOT EXISTS embeddings (
+    product_id TEXT PRIMARY KEY,
+    embedding TEXT  -- Stored as comma-separated string
+)
+""")
+
+# Commit and close
+conn.commit()
+conn.close()
+
+print(" SQLite database initialized successfully.")
+import pandas as pd
+import sqlite3
+
+# Load customer data
+customer_df = pd.read_csv("customer_data_collection.csv")
+
+# Optional cleanup
+customer_df = customer_df.rename(columns={
+    "Customer_ID": "customer_id",
+    "Age": "age",
+    "Gender": "gender",
+    "Location": "location"
+})
+customer_df["segment"] = "frequent_buyer"  # Or use your logic
+
+# Load product data
+product_df = pd.read_csv("product_recommendation_data.csv")
+product_df = product_df.rename(columns={
+    "Product_ID": "product_id",
+    "Product_Name": "name",
+    "Product_Category": "category",
+    "Product_Price": "price",
+    "Season": "season",
+    "Holiday": "holiday",
+    "Product_Description": "description"
+})
+
+# Connect to SQLite
+conn = sqlite3.connect("memory.db")
+
+# Insert into database
+customer_df[["customer_id", "age", "gender", "location", "segment"]].drop_duplicates().to_sql("customers", conn, if_exists="append", index=False)
+product_df[["product_id", "name", "category", "price", "season", "holiday", "description"]].drop_duplicates().to_sql("products", conn, if_exists="append", index=False)
+
+conn.commit()
+conn.close()
+
+print(" Data from CSV loaded into SQLite.")
+import sqlite3
+import pandas as pd
+import json
+import requests
+
+# Load products from database
+conn = sqlite3.connect("memory.db")
+df = pd.read_sql_query("SELECT product_id, description FROM products", conn)
+
+
+# Function to call Ollama's embedding API
+def get_embedding(text):
+    response = requests.post(
+        "http://localhost:11434/api/embeddings",  # Ollama local endpoint
+        json={"model": "llama-embed", "prompt": text}
+    )
+    if response.status_code == 200:
+        return response.json()["embedding"]
+    else:
+        print(" Failed embedding:", text)
+        return None
+
+
+# Insert embeddings into DB
+for _, row in df.iterrows():
+    product_id = row["product_id"]
+    text = row["description"]
+    embedding = get_embedding(text)
+
+    if embedding:
+        # Convert list of floats to comma-separated string
+        embedding_str = ",".join(map(str, embedding))
+
+        conn.execute("""
+        INSERT OR REPLACE INTO embeddings (product_id, embedding)
+        VALUES (?, ?)
+        """, (product_id, embedding_str))
+
+conn.commit()
+conn.close()
+print("Embeddings saved to database.")
+import sqlite3
+import numpy as np
+
+
+# === Base Agent ===
+class Agent:
+    def __init__(self, db_path="memory.db"):
+        self.conn = sqlite3.connect(db_path)
+        self.cursor = self.conn.cursor()
+
+
+# === Customer Agent ===
+class CustomerAgent(Agent):
+    def get_customer_profile(self, customer_id):
+        query = "SELECT * FROM customers WHERE customer_id = ?"
+        self.cursor.execute(query, (customer_id,))
+        return self.cursor.fetchone()
+
+
+# === Product Agent ===
+class ProductAgent(Agent):
+    def get_all_products(self):
+        query = "SELECT * FROM products"
+        self.cursor.execute(query)
+        return self.cursor.fetchall()
+
+    def get_embedding(self, product_id):
+        self.cursor.execute("SELECT embedding FROM embeddings WHERE product_id = ?", (product_id,))
+        result = self.cursor.fetchone()
+        return np.array([float(x) for x in result[0].split(",")]) if result else None
+
+
+# === Recommender Agent ===
+class RecommenderAgent(Agent):
+    def __init__(self):
+        super().__init__()
+        self.customer_agent = CustomerAgent()
+        self.product_agent = ProductAgent()
+
+    def recommend_products(self, customer_id, top_k=5):
+        # Step 1: Get customer profile
+        profile = self.customer_agent.get_customer_profile(customer_id)
+        if not profile:
+            return []
+
+        print(f"Profile loaded: {profile}")
+
+        # Step 2: Use the profile to define a prompt
+        prompt = f"Suggest product types for a customer who is a {profile[2]} aged {profile[1]} from {profile[3]}"
+
+        # Step 3: Call Ollama to get a vector for the prompt
+        import requests
+        response = requests.post(
+            "http://localhost:11434/api/embeddings",
+            json={"model": "llama-embed", "prompt": prompt}
+        )
+        customer_vector = np.array(response.json()["embedding"])
+
+        # Step 4: Fetch all product embeddings and compute similarity
+        self.cursor.execute("SELECT product_id, embedding FROM embeddings")
+        all_embeddings = self.cursor.fetchall()
+
+        scores = []
+        for pid, embed_str in all_embeddings:
+            product_vector = np.array([float(x) for x in embed_str.split(",")])
+            similarity = np.dot(customer_vector, product_vector)
+            scores.append((pid, similarity))
+
+        top_products = sorted(scores, key=lambda x: x[1], reverse=True)[:top_k]
+
+        # Step 5: Fetch product metadata
+        recommended = []
+        for pid, score in top_products:
+            self.cursor.execute("SELECT * FROM products WHERE product_id = ?", (pid,))
+            recommended.append(self.cursor.fetchone())
+
+        return recommended
+if __name__ == "__main__":
+    recommender = RecommenderAgent()
+    recommendations = recommender.recommend_products("C001")  # Change customer ID as needed
+
+    print("\n Recommended Products:")
+    for item in recommendations:
+        print(f" {item[1]} - ₹{item[3]} - Category: {item[2]}")
